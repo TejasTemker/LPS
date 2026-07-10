@@ -1,0 +1,323 @@
+---
+title: "Brain:LPS effect relative to B6"
+output:
+  pdf_document: default
+date: "2025-12-22"
+---
+
+```{r}
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(plotly))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(edgeR))
+suppressPackageStartupMessages(library(DESeq2))
+suppressPackageStartupMessages(library(tools))
+suppressPackageStartupMessages(library(readxl))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tibble))
+suppressPackageStartupMessages(library(readr))
+suppressPackageStartupMessages(library(ggplot2)) 
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(ggrepel))
+suppressPackageStartupMessages(library(AnnotationDbi))
+suppressPackageStartupMessages(library(org.Mm.eg.db))
+suppressPackageStartupMessages(library(pheatmap))
+source("/Users/temket/Desktop/LPS/Final_scripts/mod2/Region/functions.R")
+
+```
+
+# load the counts data & meta data 
+```{r}
+obj <- readRDS("/Users/temket/Desktop/LPS/LPS_cts_meta.rds")
+cts <- obj$cts
+meta_data <- obj$meta_data
+```
+
+```{r}
+keep_samp <- meta_data$tissue == "brain"
+cts_b    <- cts[, keep_samp, drop = FALSE]
+meta_b   <- droplevels(meta_data[keep_samp, , drop = FALSE])
+
+meta_b$Strain    <- relevel(factor(meta_b$Strain), ref = "C57BL/6J")
+meta_b$treatment <- relevel(factor(meta_b$treatment), ref = "PBS")
+group  <- factor(paste(meta_b$Strain, meta_b$treatment, sep = "."))
+
+y <- DGEList(counts = cts_b, group = group)
+keep_gene <- filterByExpr(y, group = group)
+y <- y[keep_gene, , keep.lib.sizes = TRUE]
+y <- calcNormFactors(y)
+
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+colnames(design) <- make.names(colnames(design))
+
+contr <- makeContrasts(LPSinCASTrelativetoB6 = (CAST.EiJ.LPS - CAST.EiJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+                       LPSinWSBrelativetoB6 = (WSB.EiJ.LPS - WSB.EiJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+                       LPSinNZOrelativetoB6 = (NZO.HILtJ.LPS- NZO.HILtJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+  AverageLPS = ((CAST.EiJ.LPS - CAST.EiJ.PBS) + (C57BL.6J.LPS - C57BL.6J.PBS) + (NZO.HILtJ.LPS - NZO.HILtJ.PBS) + (WSB.EiJ.LPS - WSB.EiJ.PBS)) / 4,
+  levels = design
+)
+
+y <- estimateDisp(y, design)
+fit <- glmQLFit(y, design, robust = TRUE)
+brain.qlf_CAST <- glmQLFTest(fit, contrast = contr[, "LPSinCASTrelativetoB6"])
+brain.qlf_WSB  <- glmQLFTest(fit, contrast = contr[, "LPSinWSBrelativetoB6"])
+brain.qlf_NZO  <- glmQLFTest(fit, contrast = contr[, "LPSinNZOrelativetoB6"])
+
+res.brain.qlf_CAST <- add_biomart_mouse_anno(as.data.frame(topTags(brain.qlf_CAST, n = Inf)))
+res.brain.qlf_WSB <- add_biomart_mouse_anno(as.data.frame(topTags(brain.qlf_WSB , n = Inf)))
+res.brain.qlf_NZO <- add_biomart_mouse_anno(as.data.frame(topTags(brain.qlf_NZO, n = Inf)))
+
+combine_results <- function(res_list, tissue_name) {
+  bind_rows(
+    res_list$CAST %>% mutate(tissue = tissue_name, contrast = "LPSinCASTrelativetoB6"),
+    res_list$WSB  %>% mutate(tissue = tissue_name, contrast = "LPSinWSBrelativetoB6"),
+    res_list$NZO  %>% mutate(tissue = tissue_name, contrast = "LPSinNZOrelativetoB6")
+  )
+}
+
+all_deg_results <- bind_rows(
+  combine_results(list(CAST = res.brain.qlf_CAST,   WSB = res.brain.qlf_WSB,   NZO = res.brain.qlf_NZO),   "brain")
+)
+
+write.csv(all_deg_results, "/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/brain.strain.B6.results.csv", row.names = FALSE)
+```
+
+```{r}
+p <- create_volcano(res.brain.qlf_CAST, FC = "logFC", "Brain: CAST v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Brain.volcano_CAST_v_B6.png", plot = p, width = 7, height = 6, dpi = 300)
+
+p <- create_volcano(res.brain.qlf_WSB, FC = "logFC", "Brain: WSB v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Brain.volcano_WSB_v_B6.png", plot = p, width = 7, height = 6, dpi = 300)
+
+p <- create_volcano(res.brain.qlf_NZO, FC = "logFC", "Brain: NZO v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Brain.volcano_NZO_v_B6.png", plot = p, width = 7, height = 6, dpi = 300)
+
+```
+
+
+
+```{r}
+# CAST vs B6
+hm1 <- plot_sig_heatmap(res, y, meta_b,
+  FC = "logFC.LPSinCASTrelativetoB6",
+  strains = c("CAST/EiJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_CAST_vs_B6.pdf", plot = hm1$pheatmap$gtable, width = 8, height = 6)
+
+# WSB vs B6
+hm2 <- plot_sig_heatmap(res, y, meta_b,
+  FC = "logFC.LPSinWSBrelativetoB6",
+  strains = c("WSB/EiJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_WSB_vs_B6.pdf", plot = hm2$pheatmap$gtable, width = 8, height = 6)
+
+# NZO vs B6
+hm3 <- plot_sig_heatmap(res, y, meta_b,
+  FC = "logFC.LPSinNZOrelativetoB6",
+  strains = c("NZO/HILtJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_NZO_vs_B6.pdf", plot = hm3$pheatmap$gtable, width = 8, height = 6)
+
+```
+
+
+
+```{r}
+keep_samp <- meta_data$tissue == "retina"
+cts_r    <- cts[, keep_samp, drop = FALSE]
+meta_r   <- droplevels(meta_data[keep_samp, , drop = FALSE])
+
+meta_r$Strain    <- relevel(factor(meta_r$Strain), ref = "C57BL/6J")
+meta_r$treatment <- relevel(factor(meta_r$treatment), ref = "PBS")
+group  <- factor(paste(meta_r$Strain, meta_r$treatment, sep = "."))
+
+y_r <- DGEList(counts = cts_r, group = group)
+keep_gene <- filterByExpr(y_r, group = group)
+y_r <- y_r[keep_gene, , keep.lib.sizes = TRUE]
+y_r <- calcNormFactors(y_r)
+
+design_r <- model.matrix(~0 + group)
+colnames(design_r) <- levels(group)
+colnames(design_r) <- make.names(colnames(design_r))
+
+contr_r <- makeContrasts(LPSinCASTrelativetoB6 = (CAST.EiJ.LPS - CAST.EiJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+                       LPSinWSBrelativetoB6 = (WSB.EiJ.LPS - WSB.EiJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+                       LPSinNZOrelativetoB6 = (NZO.HILtJ.LPS- NZO.HILtJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+  AverageLPS = ((CAST.EiJ.LPS - CAST.EiJ.PBS) + (C57BL.6J.LPS - C57BL.6J.PBS) + (NZO.HILtJ.LPS - NZO.HILtJ.PBS) + (WSB.EiJ.LPS - WSB.EiJ.PBS)) / 4,
+  levels = design_r
+)
+
+y_r <- estimateDisp(y_r, design_r)
+fit_r <- glmQLFit(y_r, design_r, robust = TRUE)
+Retina.qlf_CAST <- glmQLFTest(fit_r, contrast = contr[, "LPSinCASTrelativetoB6"])
+Retina.qlf_WSB  <- glmQLFTest(fit_r, contrast = contr[, "LPSinWSBrelativetoB6"])
+Retina.qlf_NZO  <- glmQLFTest(fit_r, contrast = contr[, "LPSinNZOrelativetoB6"])
+
+res.Retina.qlf_CAST <- add_biomart_mouse_anno(as.data.frame(topTags(Retina.qlf_CAST, n = Inf)))
+res.Retina.qlf_WSB <- add_biomart_mouse_anno(as.data.frame(topTags(Retina.qlf_WSB , n = Inf)))
+res.Retina.qlf_NZO <- add_biomart_mouse_anno(as.data.frame(topTags(Retina.qlf_NZO, n = Inf)))
+
+
+all_deg_results <- bind_rows(
+  combine_results(list(CAST = res.Retina.qlf_CAST,   WSB = res.Retina.qlf_WSB,   NZO = res.Retina.qlf_NZO),   "Retina")
+)
+
+write.csv(all_deg_results, "/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/retina.strain.B6.results.csv", row.names = FALSE)
+
+```
+
+```{r}
+library(ggplot2)
+
+p1 <- create_volcano(res.Retina.qlf_CAST, FC = "logFC", "Retina: CAST v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Retina.volcano_retina_CAST_vs_B6.png", plot = p1, width = 7, height = 6)
+
+p2 <- create_volcano(res.Retina.qlf_WSB, FC = "logFC", "Retina: WSB v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Retina.volcano_retina_WSB_vs_B6.png", plot = p2, width = 7, height = 6)
+
+p3 <- create_volcano(res.Retina.qlf_NZO, FC = "logFC", "Retina: NZO v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Retina.volcano_retina_NZO_vs_B6.png", plot = p3, width = 7, height = 6)
+
+```
+
+
+```{r}
+library(ggplot2)
+
+# CAST vs B6
+hm1 <- plot_sig_heatmap(res_r, y_r, meta_r,
+  FC = "logFC.LPSinCASTrelativetoB6",
+  strains = c("CAST/EiJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_retina_CAST_vs_B6.pdf", plot = hm1$pheatmap$gtable, width = 8, height = 6)
+
+# WSB vs B6
+hm2 <- plot_sig_heatmap(res_r, y_r, meta_r,
+  FC = "logFC.LPSinWSBrelativetoB6",
+  strains = c("WSB/EiJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_retina_WSB_vs_B6.pdf", plot = hm2$pheatmap$gtable, width = 8, height = 6)
+
+# NZO vs B6
+hm3 <- plot_sig_heatmap(res_r, y_r, meta_r,
+  FC = "logFC.LPSinNZOrelativetoB6",
+  strains = c("NZO/HILtJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_retina_NZO_vs_B6.pdf", plot = hm3$pheatmap$gtable, width = 8, height = 6)
+
+```
+
+```{r}
+keep_samp <- meta_data$tissue == "ONH"
+cts_o    <- cts[, keep_samp, drop = FALSE]
+meta_o   <- droplevels(meta_data[keep_samp, , drop = FALSE])
+
+meta_o$Strain    <- relevel(factor(meta_o$Strain), ref = "C57BL/6J")
+meta_o$treatment <- relevel(factor(meta_o$treatment), ref = "PBS")
+group  <- factor(paste(meta_o$Strain, meta_o$treatment, sep = "."))
+
+y_o <- DGEList(counts = cts_o, group = group)
+keep_gene <- filterByExpr(y_o, group = group)
+y_o <- y_o[keep_gene, , keep.lib.sizes = TRUE]
+y_o <- calcNormFactors(y_o)
+
+design_o <- model.matrix(~0 + group)
+colnames(design_o) <- levels(group)
+colnames(design_o) <- make.names(colnames(design_o))
+
+contr_o <- makeContrasts(LPSinCASTrelativetoB6 = (CAST.EiJ.LPS - CAST.EiJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+                       LPSinWSBrelativetoB6 = (WSB.EiJ.LPS - WSB.EiJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+                       LPSinNZOrelativetoB6 = (NZO.HILtJ.LPS- NZO.HILtJ.PBS) - (C57BL.6J.LPS - C57BL.6J.PBS),
+  AverageLPS = ((CAST.EiJ.LPS - CAST.EiJ.PBS) + (C57BL.6J.LPS - C57BL.6J.PBS) + (NZO.HILtJ.LPS - NZO.HILtJ.PBS) + (WSB.EiJ.LPS - WSB.EiJ.PBS)) / 4,
+  levels = design_o
+)
+
+y_o <- estimateDisp(y_o, design_o)
+fit_o <- glmQLFit(y_o, design_o, robust = TRUE)
+ONH.qlf_CAST <- glmQLFTest(fit_o, contrast = contr[, "LPSinCASTrelativetoB6"])
+ONH.qlf_WSB  <- glmQLFTest(fit_o, contrast = contr[, "LPSinWSBrelativetoB6"])
+ONH.qlf_NZO  <- glmQLFTest(fit_o, contrast = contr[, "LPSinNZOrelativetoB6"])
+
+res.ONH.qlf_CAST <- add_biomart_mouse_anno(as.data.frame(topTags(ONH.qlf_CAST, n = Inf)))
+res.ONH.qlf_WSB <- add_biomart_mouse_anno(as.data.frame(topTags(ONH.qlf_WSB , n = Inf)))
+res.ONH.qlf_NZO <- add_biomart_mouse_anno(as.data.frame(topTags(ONH.qlf_NZO, n = Inf)))
+
+
+all_deg_results <- bind_rows(
+  combine_results(list(CAST = res.ONH.qlf_CAST,   WSB = res.ONH.qlf_WSB,   NZO = res.ONH.qlf_NZO),   "ONH")
+)
+
+write.csv(all_deg_results, "/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/ONH.strain.B6.results.csv", row.names = FALSE)
+
+```
+
+```{r}
+library(ggplot2)
+
+p1 <- create_volcano(res.ONH.qlf_CAST, FC = "logFC", "ONH: CAST v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/ONH.volcano_onh_CAST_vs_B6.png", plot = p1, width = 7, height = 6)
+
+p2 <- create_volcano(res.ONH.qlf_WSB, FC = "logFC", "ONH: WSB v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/ONH.volcano_onh_WSB_vs_B6.png", plot = p2, width = 7, height = 6)
+
+p3 <- create_volcano(res.ONH.qlf_NZO, FC = "logFC", "ONH: NZO v B6 ")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/ONH.volcano_onh_NZO_vs_B6.png", plot = p3, width = 7, height = 6)
+
+```
+
+
+```{r}
+library(ggplot2)
+
+# CAST vs B6
+hm1 <- plot_sig_heatmap(res_o, y_o, meta_o,
+  FC = "logFC.LPSinCASTrelativetoB6",
+  strains = c("CAST/EiJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_onh_CAST_vs_B6.pdf", plot = hm1$pheatmap$gtable, width = 8, height = 6)
+
+# WSB vs B6
+hm2 <- plot_sig_heatmap(res_o, y_o, meta_o,
+  FC = "logFC.LPSinWSBrelativetoB6",
+  strains = c("WSB/EiJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_onh_WSB_vs_B6.pdf", plot = hm2$pheatmap$gtable, width = 8, height = 6)
+
+# NZO vs B6
+hm3 <- plot_sig_heatmap(res_o, y_o, meta_o,
+  FC = "logFC.LPSinNZOrelativetoB6",
+  strains = c("NZO/HILtJ", "C57BL/6J"),
+  show_colnames = TRUE, fdr_cut = 0.05, top_n = 25
+)
+ggsave("/pod/2/howell-lab/temket/LPS/results/strain/B6.relative/heatmap_onh_NZO_vs_B6.pdf", plot = hm3$pheatmap$gtable, width = 8, height = 6)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

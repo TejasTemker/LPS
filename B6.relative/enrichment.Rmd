@@ -1,0 +1,292 @@
+---
+title: "Strain vs B6"
+output:
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(clusterProfiler)
+  library(org.Mm.eg.db)
+  library(ggplot2)
+  library(ggprism)
+  library(dplyr)
+  library(tidyr)
+  library(scales)
+  library(patchwork)
+  library(stringr)
+  library(tools)
+})
+source("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/functions.R")  
+pivot_to_wide <- function(path) {
+  read.csv(path, stringsAsFactors = FALSE) %>%
+    pivot_wider(
+      id_cols     = c(ensembl_gene_id, symbol, description),
+      names_from  = contrast,
+      values_from = c(logFC, logCPM, F, PValue, FDR),
+      names_sep   = "."
+    )
+}
+
+brain_res  <- pivot_to_wide("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/brain.strain.B6.results.csv")
+retina_res <- pivot_to_wide("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/retina.strain.B6.results.csv")
+onh_res    <- pivot_to_wide("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/ONH.strain.B6.results.csv")
+```
+
+```{r ora-and-deg-counts, message=FALSE, warning=FALSE}
+universes <- list(
+  brain  = sym2entrez(brain_res$symbol),
+  retina = sym2entrez(retina_res$symbol),
+  onh    = sym2entrez(onh_res$symbol)
+)
+
+comp_defs <- list(
+  list(tissue = "brain",  res = brain_res,  fc_col = "logFC.LPSinCASTrelativetoB6", strain = "CAST"),
+  list(tissue = "brain",  res = brain_res,  fc_col = "logFC.LPSinWSBrelativetoB6",  strain = "WSB"),
+  list(tissue = "brain",  res = brain_res,  fc_col = "logFC.LPSinNZOrelativetoB6",  strain = "NZO"),
+  list(tissue = "retina", res = retina_res, fc_col = "logFC.LPSinCASTrelativetoB6", strain = "CAST"),
+  list(tissue = "retina", res = retina_res, fc_col = "logFC.LPSinWSBrelativetoB6",  strain = "WSB"),
+  list(tissue = "retina", res = retina_res, fc_col = "logFC.LPSinNZOrelativetoB6",  strain = "NZO"),
+  list(tissue = "onh",    res = onh_res,    fc_col = "logFC.LPSinCASTrelativetoB6", strain = "CAST"),
+  list(tissue = "onh",    res = onh_res,    fc_col = "logFC.LPSinWSBrelativetoB6",  strain = "WSB"),
+  list(tissue = "onh",    res = onh_res,    fc_col = "logFC.LPSinNZOrelativetoB6",  strain = "NZO")
+)
+
+all_ora    <- list()
+deg_counts <- vector("list", length(comp_defs))
+
+for (i in seq_along(comp_defs)) {
+  tissue <- comp_defs[[i]]$tissue
+  res    <- comp_defs[[i]]$res
+  fc_col <- comp_defs[[i]]$fc_col
+  strain <- comp_defs[[i]]$strain
+
+  fdr_col     <- sub("logFC\\.", "FDR.", fc_col)
+  res_tmp     <- res
+  res_tmp$FDR <- res_tmp[[fdr_col]]
+
+  key  <- paste(tissue, strain, sep = "_")
+  # lfc_cut = 0.5 (default): FDR <= 0.05 AND |logFC| >= 0.5
+  degs <- extract_degs(res_tmp, fc_col, fdr_cut = 0.05, lfc_cut = 0.5)
+
+  all_ora[[paste0(key, "_up")]]   <- run_ora(degs$up,   universes[[tissue]])
+  all_ora[[paste0(key, "_down")]] <- run_ora(degs$down, universes[[tissue]])
+
+  deg_counts[[i]] <- data.frame(
+    tissue = tools::toTitleCase(tissue),
+    strain = strain,
+    n_up   = degs$n_up,
+    n_down = degs$n_down,
+    total  = degs$n_up + degs$n_down
+  )
+}
+
+deg_counts <- do.call(rbind, deg_counts)
+deg_counts$tissue[deg_counts$tissue == "Onh"] <- "ONH"
+
+outdir <- "/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/enrichment/"   # update path as needed
+dir.create(outdir, showWarnings = FALSE)
+for (nm in names(all_ora)) {
+  x <- all_ora[[nm]]
+  if (is.null(x)) next
+  df <- as.data.frame(x)
+  if (!nrow(df)) next
+  df <- df %>%
+    dplyr::select(ID, Description, GeneRatio, BgRatio, pvalue, p.adjust, Count, geneID) %>%
+    mutate(comparison = nm, .before = 1)
+  write.csv(df, file.path(outdir, paste0(nm, ".csv")), row.names = FALSE)
+}
+```
+
+```{r}
+build_tissue_df <- function(tissue, top_n = 8, strains = c("CAST", "WSB", "NZO")) {
+  rows <- list()
+  for (strain in strains) {
+    for (direction in c("up", "down")) {
+      nm  <- paste(tissue, strain, direction, sep = "_")
+      top <- get_top_terms(all_ora[[nm]], top_n)
+      if (is.null(top)) next
+      top$strain    <- strain
+      top$direction <- if (direction == "up") "Higher than B6" else "Lower than B6"
+      rows[[length(rows) + 1]] <- top
+    }
+  }
+  if (!length(rows)) return(NULL)
+  df <- do.call(rbind, rows)
+  df$Description_short <- shorten_term(df$Description)
+  df$GR_num <- vapply(
+    strsplit(df$GeneRatio, "/"),
+    function(x) as.numeric(x[1]) / as.numeric(x[2]),
+    numeric(1)
+  )
+  df
+}
+
+brain_df  <- build_tissue_df("brain")
+retina_df <- build_tissue_df("retina")
+onh_df    <- build_tissue_df("onh")
+white_bg <- theme(
+  plot.background   = element_rect(fill = "white", colour = NA),
+  panel.background  = element_rect(fill = "white", colour = NA),
+  legend.background = element_rect(fill = "white", colour = NA),
+  legend.key        = element_rect(fill = "white", colour = NA)
+)
+```
+
+# ONH
+```{r}
+p_onh_bar <- make_deg_bar(deg_counts, "ONH","ONH: Strain-Specific LPS-Induced DEGs Relative to B6")
+p_onh_dot <- make_dotplot(onh_df, "ONH: Strain-Specific LPS Response Relative to B6")
+p_onh_bar
+p_onh_dot
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Figure7A_onh_deg_bar.png",
+       p_onh_bar, width = 14, height = 7, dpi = 300, bg = "grey92")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Figure7B_onh_dotplot.png",
+       p_onh_dot, width = 13, height = 7, dpi = 300, bg = "white")
+
+
+p_onh <- (p_onh_bar & white_bg) + (p_onh_dot & white_bg) +
+  plot_layout(widths = c(1, 1.4)) +
+  plot_annotation(
+    tag_levels = "A",
+    theme = theme(
+      plot.tag = element_text(face = "bold", size = 30)
+    )
+  )
+
+p_onh
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/onh_combined.png",
+       p_onh, width = 22, height = 7, dpi = 500, bg = "white")
+```
+
+#Brain
+```{r}
+p_brain_bar <- make_deg_bar(deg_counts, "Brain",
+                             "Brain: Strain-Specific LPS-Induced DEGs Relative to B6")
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/Figure8A_brain_deg_bar.png",
+       p_brain_bar, width = 14, height = 7, dpi = 300, bg = "grey92")
+p_brain_bar
+
+collagen_genes <- c("Ccn2", "Il6ra", "Rgcc", "Errfi1", "Arg1", "Itga2")
+
+brain_long <- read.csv("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/brain.strain.B6.results.csv", stringsAsFactors = FALSE)
+
+collagen_df <- brain_long %>%
+  filter(symbol %in% collagen_genes, contrast == "LPSinNZOrelativetoB6") %>%
+  arrange(logFC) %>%
+  mutate(
+    symbol    = factor(symbol, levels = symbol),
+    sig       = FDR < 0.05,
+    direction = ifelse(logFC > 0, "Higher in NZO", "Lower in NZO")
+  )
+
+bg_col     <- "grey92"
+dir_colors <- c("Higher in NZO" = "#009E73", "Lower in NZO" = "#D55E00")
+
+p_collagen <- ggplot(collagen_df, aes(x = logFC, y = symbol, color = direction)) +
+  geom_vline(xintercept = 0, linewidth = 0.9, color = "grey40", linetype = "dashed") +
+  geom_segment(aes(x = 0, xend = logFC, y = symbol, yend = symbol),
+               linewidth = 1.5, alpha = 0.75) +
+  geom_point(aes(size = -log10(FDR + 1e-10), shape = sig), stroke = 1.5) +
+  scale_color_manual(values = dir_colors, name = "LPS response\nvs B6") +
+  scale_shape_manual(
+    values = c("TRUE" = 16, "FALSE" = 1),
+    labels = c("TRUE" = "FDR < 0.05", "FALSE" = "FDR \u2265 0.05"),
+    name   = "Significance"
+  ) +
+  scale_size_continuous(
+    name   = "-log(FDR)",
+    range  = c(5, 12),
+    breaks = c(2, 4, 6),
+    guide  = guide_legend(override.aes = list(shape = 16, color = "grey40"))
+  ) +
+  labs(
+    title    = "Collagen Biosynthesis Genes: NZO LPS Response Relative to B6 (Brain)",
+    
+    x        = "Interaction logFC (NZO vs B6)",
+    y        = NULL
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.background   = element_rect(fill = bg_col, colour = NA),
+    panel.background  = element_rect(fill = bg_col, colour = NA),
+    axis.line         = element_line(linewidth = 1.1, colour = "black"),
+    axis.text         = element_text(size = 11, face = "bold"),
+    axis.title.x      = element_text(size = 13, face = "bold", margin = margin(t = 8)),
+    plot.title        = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle     = element_text(size = 11, colour = "grey40", hjust = 0.5),
+    legend.background = element_rect(fill = bg_col, colour = NA),
+    legend.key        = element_rect(fill = bg_col, colour = NA),
+    legend.title      = element_text(size = 11, face = "bold"),
+    legend.text       = element_text(size = 10),
+    plot.margin       = margin(t = 15, r = 20, b = 10, l = 20)
+  )
+
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/brain_collagen_NZO_logFC.png",
+       p_collagen, width = 10, height = 5, dpi = 300, bg = bg_col)
+p_collagen
+```
+
+```{r}
+p_brain <- (p_brain_bar & white_bg) | (p_collagen & white_bg)
+p_brain <- p_brain +
+  plot_layout(widths = c(1, 1.4)) +
+  plot_annotation(
+    tag_levels = "A",
+    theme = theme(
+      plot.tag        = element_text(face = "bold", size = 28),
+      plot.background = element_rect(fill = "white", color = NA)
+    )
+  )
+
+ggsave(
+  "/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/brain_combined.png",
+  p_brain,
+  width  = 18,
+  height = 6,
+  dpi    = 300,
+  bg     = "white"
+)
+```
+
+
+
+#Retina 
+
+```{r}
+p_retina_bar <- make_deg_bar(deg_counts, "Retina", "Retina: Strain-Specific LPS-Induced DEGs Relative to B6")
+
+p_retina_dot <- make_dotplot(retina_df, "Retina: Strain-Specific LPS Response Relative to B6")
+
+p_retina_bar
+p_retina_dot
+# ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/retina_deg_bar.png",
+#        p_retina_bar, width = 14, height = 7, dpi = 300, bg = "grey92")
+# ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/retina_dotplot.png",
+#        p_retina_dot, width = 13, height = 9, dpi = 300, bg = "white")
+
+NZO <- make_rep_heatmap(
+  nzo_rep,
+  "NZO RGC Marker Genes (row z-score)",
+  file.path(out_dir, "NZO_RGC_zscore_reps.png"),
+  160
+)
+
+WSB <- make_rep_heatmap(
+  wsb_rep,
+  "WSB Photoreceptor Marker Genes (row z-score)",
+  file.path(out_dir, "WSB_photoreceptors_zscore_reps.png"),
+  260
+)
+
+p_retina <- (p_retina_bar + p_retina_dot) / (NZO + WSB) +
+  plot_layout(heights = c(1.2, 5.0), widths = c(1, 2.4)) +
+  plot_annotation(
+    tag_levels = "A",
+    theme = theme(plot.tag = element_text(face = "bold", size = 28))
+  ) & white_bg
+p_retina
+
+ggsave("/Users/temket/Desktop/LPS/Final_scripts/mod3/B6.relative/figs/retina_combined.png",
+       p_retina, width = 22, height = 20, dpi = 300, bg = "white")
+
+```

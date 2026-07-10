@@ -1,0 +1,238 @@
+```{r}
+suppressPackageStartupMessages({
+  library(edgeR)
+  library(dplyr)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+dat  <- readRDS("/Users/temket/Desktop/LPS/LPS_cts_meta.rds")
+cts  <- dat$cts
+meta <- dat$meta_data
+
+# DAM genes 
+dam_genes <- c(
+  "Ctsb","Ctsd","Apoe","B2m","Fth1","Lyz2",
+  "Trem2","Tyrobp","Cst7","Ctsl","Lpl","Cd9","Csf1","Itgax",
+  "Clec7a","Timp2","Spp1","Gpnmb","Fabp5","Lgals3","Cd63","Cd68",
+  "Axl","Msr1",
+  "P2ry12","Sall1","Tmem119","Siglech","Cx3cr1"
+)
+
+#  IRM genes
+
+irm_genes <- c(
+  "Ifit1","Ifit2","Ifit3","Ifitm3","Isg15","Mx1",
+  "Oas1a","Oas1b","Oas1c","Oas1g","Oas2","Oas3","Oasl1","Oasl2",
+  "Stat1","Stat2","Irf7","Irf9",
+  "Cxcl10","Ccl12",
+  "Siglech","Tmem119","P2ry12","Cx3cr1","Sall1"
+)
+```
+
+
+```{r}
+combined_genes <- unique(c(irm_genes, dam_genes))
+
+sym_map <- bind_rows(
+  read.csv("/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/Brain.effect.csv"),
+  read.csv("/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/ONH.effect.csv"),
+  read.csv("/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/Retina.effect.csv")
+) %>%
+  select(ensembl_gene_id, symbol) %>%
+  distinct() %>%
+  filter(!is.na(symbol), nzchar(symbol))
+
+make_lcpm_sym <- function(tissue_name) {
+  samp_ids <- rownames(meta)[meta$tissue == tissue_name]
+  cts_sub  <- cts[, samp_ids]
+
+  dge  <- DGEList(counts = cts_sub)
+  dge  <- calcNormFactors(dge, method = "TMM")
+  lcpm <- cpm(dge, log = TRUE, prior.count = 1)
+
+  lcpm_df <- as.data.frame(lcpm) %>%
+    mutate(ensembl_gene_id = rownames(lcpm)) %>%
+    left_join(sym_map, by = "ensembl_gene_id") %>%
+    filter(!is.na(symbol)) %>%
+    mutate(row_mean = rowMeans(across(where(is.numeric)))) %>%
+    group_by(symbol) %>%
+    slice_max(row_mean, n = 1, with_ties = FALSE) %>%
+    ungroup()
+
+  mat <- as.matrix(select(lcpm_df, -ensembl_gene_id, -symbol, -row_mean))
+  rownames(mat) <- lcpm_df$symbol
+  mat
+}
+
+lcpm_brain  <- make_lcpm_sym("brain")
+lcpm_onh    <- make_lcpm_sym("ONH")
+lcpm_retina <- make_lcpm_sym("retina")
+
+# ── Column ordering: Brain | ONH | Retina, within each: B6/CAST/WSB/NZO x PBS->LPS ──
+strain_lookup <- c(B6 = "C57BL/6J", CAST = "CAST/EiJ", WSB = "WSB/EiJ", NZO = "NZO/HILtJ")
+strain_order  <- c("B6", "CAST", "WSB", "NZO")
+trt_order     <- c("PBS", "LPS")
+
+get_col_order <- function(tissue_name) {
+  samp_ids <- rownames(meta)[meta$tissue == tissue_name]
+  m <- meta[samp_ids, ]
+
+  ordered_cols <- c()
+  for (s in strain_order) {
+    for (t in trt_order) {
+      cols <- rownames(m)[m$Strain == strain_lookup[s] & m$treatment == t]
+      ordered_cols <- c(ordered_cols, cols)
+    }
+  }
+  ordered_cols
+}
+
+col_brain  <- get_col_order("brain")
+col_onh    <- get_col_order("ONH")
+col_retina <- get_col_order("retina")
+
+# ── Row z-score per tissue, then cbind across tissues ─────────────────────────
+make_zscore_tissue <- function(lcpm_mat, col_order, gene_list) {
+  mat  <- lcpm_mat[gene_list, col_order, drop = FALSE]
+  zmat <- t(scale(t(mat)))
+  zmat[apply(zmat, 1, function(x) any(is.nan(x))), ] <- 0
+  zmat
+}
+
+make_combined_zscore <- function(gene_list) {
+  present_all <- Reduce(
+    intersect,
+    list(rownames(lcpm_brain), rownames(lcpm_onh), rownames(lcpm_retina))
+  )
+
+  keep <- gene_list[gene_list %in% present_all]
+  missing <- setdiff(gene_list, keep)
+
+  if (length(missing) > 0) {
+    message("Genes not found in all tissues and excluded: ", paste(missing, collapse = ", "))
+  }
+
+  z_brain  <- make_zscore_tissue(lcpm_brain,  col_brain,  keep)
+  z_onh    <- make_zscore_tissue(lcpm_onh,    col_onh,    keep)
+  z_retina <- make_zscore_tissue(lcpm_retina, col_retina, keep)
+
+  cbind(z_brain, z_onh, z_retina)
+}
+
+combined_mat <- make_combined_zscore(combined_genes)
+
+# ── Shared aesthetics ─────────────────────────────────────────────────────────
+col_fun <- colorRamp2(c(-2, 0, 2), c("#3B4CC0", "white", "#F7A11A"))
+
+strain_cols    <- c(B6 = "#888888", CAST = "#E69F00", WSB = "#56B4E9", NZO = "#009E73")
+treatment_cols <- c(PBS = "#BDBDBD", LPS = "#D55E00")
+region_cols    <- c(Brain = "#7B2D8B", ONH = "#1B7837", Retina = "#C0392B")
+
+all_cols <- c(col_brain, col_onh, col_retina)
+
+region_vec <- c(
+  rep("Brain",  length(col_brain)),
+  rep("ONH",    length(col_onh)),
+  rep("Retina", length(col_retina))
+)
+
+strain_vec <- sapply(all_cols, function(s) {
+  full <- meta[s, "Strain"]
+  names(strain_lookup)[strain_lookup == full]
+})
+
+trt_vec <- meta[all_cols, "treatment"]
+
+col_ann <- HeatmapAnnotation(
+  Region    = factor(region_vec, levels = c("Brain","ONH","Retina")),
+  Strain    = factor(strain_vec, levels = strain_order),
+  Treatment = factor(trt_vec,    levels = trt_order),
+  col = list(
+    Region    = region_cols,
+    Strain    = strain_cols,
+    Treatment = treatment_cols
+  ),
+  annotation_name_side = "left",
+  annotation_name_gp   = gpar(fontsize = 10, fontface = "bold"),
+  simple_anno_size     = unit(4, "mm"),
+  show_legend          = TRUE,
+  annotation_legend_param = list(
+    Region    = list(title = "Region",    title_gp = gpar(fontsize = 10, fontface = "bold"), labels_gp = gpar(fontsize = 9)),
+    Strain    = list(title = "Strain",    title_gp = gpar(fontsize = 10, fontface = "bold"), labels_gp = gpar(fontsize = 9)),
+    Treatment = list(title = "Treatment", title_gp = gpar(fontsize = 10, fontface = "bold"), labels_gp = gpar(fontsize = 9))
+  )
+)
+
+col_split <- factor(region_vec, levels = c("Brain","ONH","Retina"))
+
+gene_class <- ifelse(
+  rownames(combined_mat) %in% irm_genes & rownames(combined_mat) %in% dam_genes,
+  "Homeostatic",
+  ifelse(rownames(combined_mat) %in% irm_genes, "IRM", "DAM")
+)
+
+row_ann <- rowAnnotation(
+  Signature = factor(gene_class, levels = c("IRM", "DAM", "Homeostatic")),
+  col = list(
+    Signature = c(
+      IRM = "#4575B4",
+      DAM = "#D73027",
+      Homeostatic = "#7B3294"
+    )
+  ),
+  annotation_name_gp = gpar(fontsize = 10, fontface = "bold"),
+  simple_anno_size = unit(4, "mm")
+)
+
+combined_ht <- Heatmap(
+  combined_mat[, all_cols],
+  name  = "Z-score",
+  col   = col_fun,
+  top_annotation  = col_ann,
+  left_annotation = row_ann,
+
+  cluster_rows             = TRUE,
+  clustering_method_rows   = "ward.D2",
+  clustering_distance_rows = "euclidean",
+  show_row_dend            = TRUE,
+  row_dend_width           = unit(8, "mm"),
+
+  cluster_columns   = FALSE,
+  column_order      = all_cols,
+  column_split      = col_split,
+  column_gap        = unit(3, "mm"),
+  show_column_names = FALSE,
+
+  row_names_side = "right",
+  row_names_gp   = gpar(fontsize = 9),
+
+  rect_gp = gpar(col = "white", lwd = 0.4),
+  border  = TRUE,
+
+  column_title      = c("Brain", "ONH", "Retina"),
+  column_title_gp   = gpar(fontsize = 13, fontface = "bold"),
+  column_title_side = "top",
+
+  heatmap_legend_param = list(
+    title         = "Z-score",
+    title_gp      = gpar(fontsize = 10, fontface = "bold"),
+    labels_gp     = gpar(fontsize = 9),
+    legend_height = unit(35, "mm"),
+    at            = c(-2, -1, 0, 1, 2),
+    direction     = "vertical"
+  )
+)
+
+png("/Users/temket/Desktop/LPS/Final_scripts/mod3/DAM_IRM_combined_heatmap.png", width = 18, height = 12, units = "in", res = 300, bg = "white")
+draw(
+  combined_ht,
+  padding                = unit(c(15, 60, 15, 15), "mm"),
+  heatmap_legend_side    = "right",
+  annotation_legend_side = "right",
+  merge_legend           = FALSE
+)
+dev.off()
+```
+
