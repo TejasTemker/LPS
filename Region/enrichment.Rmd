@@ -1,0 +1,477 @@
+---
+title: "LPS Tissue analysis"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(tibble)
+  library(tidyr)
+  library(purrr)
+  library(stringr)
+  library(forcats)
+  library(ggplot2)
+  library(patchwork)
+  library(edgeR)
+  library(limma)
+  library(VennDiagram)
+  library(clusterProfiler)
+  library(org.Mm.eg.db)
+  library(AnnotationDbi)
+  library(dplyr)
+  library(clusterProfiler)
+  library(org.Mm.eg.db)
+  library(AnnotationDbi)
+  library(ggplot2)
+  library(patchwork)
+  library(RColorBrewer)
+  library(png)
+  library(grid)
+  library(patchwork)
+  })
+
+source("/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/functions.R")
+lps_rds <- readRDS("/Users/temket/Desktop/LPS/LPS_cts_meta.rds")
+output_dir <- "/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/figs"
+ora_dir   <- "/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/enrichment"
+
+FDR_THRESH <- 0.05
+LFC_THRESH <- 0.5
+```
+
+
+```{r}
+cts <- as.matrix(lps_rds$cts)
+meta <- as.data.frame(lps_rds$meta_data) %>%
+  tibble::rownames_to_column("sample_id") %>%
+  as_tibble()
+meta <- meta[match(colnames(cts), meta$sample_id), , drop = FALSE]
+brain  <- auto_read_effect("/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/Brain.effect.csv")  %>% classify_deg()
+onh    <- auto_read_effect("/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/ONH.effect.csv")    %>% classify_deg()
+retina <- auto_read_effect("/Users/temket/Desktop/LPS/Final_scripts/mod3/Region/Retina.effect.csv") %>% classify_deg()
+
+deg_list <- list(Brain = brain, ONH = onh, Retina = retina)
+```
+
+## MDS plot
+```{r}
+dge <- DGEList(counts = cts)
+keep <- filterByExpr(dge, group = interaction(meta$tissue, meta$treatment, drop = TRUE))
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dge <- calcNormFactors(dge)
+log_cpm <- cpm(dge, log = TRUE, prior.count = 2)
+
+mds <- limma::plotMDS(log_cpm, plot = FALSE)
+mds_df <- meta %>% mutate(MDS1 = mds$x, MDS2 = mds$y)
+
+base_mds_theme <- theme_bw(base_size = 10) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.tag = element_text(face = "bold", size = 14),
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8)
+  )
+
+p_mds_treatment <- ggplot(mds_df, aes(MDS1, MDS2, color = treatment)) +
+  geom_point(size = 2.8, alpha = 0.9) +
+  labs(title = "Treatment (LPS vs PBS)", x = "MDS1", y = "MDS2") +
+  base_mds_theme
+
+p_mds_tissue <- ggplot(mds_df, aes(MDS1, MDS2, color = tissue)) +
+  geom_point(size = 2.8, alpha = 0.9) +
+  labs(title = "Tissue Region", x = "MDS1", y = "MDS2") +
+  base_mds_theme
+
+p_mds_strain <- ggplot(mds_df, aes(MDS1, MDS2, color = Strain)) +
+  geom_point(size = 2.8, alpha = 0.9) +
+  labs(title = "Strain", x = "MDS1", y = "MDS2") +
+  base_mds_theme
+
+fig1 <- p_mds_treatment + p_mds_tissue + p_mds_strain +
+  plot_layout(ncol = 3) +
+  plot_annotation(
+    title = "MDS of All Samples Colored by Experimental Variables",
+    tag_levels = "A",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5, face = "bold")
+    )
+  )
+
+fig1
+
+# ggsave(file.path(output_dir, "MDS_panels.png"), fig1, width = 14, height = 4.5, dpi = 180)
+```
+
+## DEG counts 
+```{r}
+deg_counts <- imap_dfr(deg_list, ~tibble(
+  Tissue = .y,
+  Up = sum(.x$direction == "Up"),
+  Down = sum(.x$direction == "Down")
+)) %>%
+  mutate(
+    Tissue = factor(Tissue, levels = c("Brain", "Retina", "ONH")),
+    Down = -Down,
+    Total = Up + abs(Down)
+  )
+
+ymax <- ceiling(max(abs(c(deg_counts$Up, deg_counts$Down))) / 1000) * 1000
+label_offset <- 220
+
+deg_long <- deg_counts %>%
+  pivot_longer(c(Up, Down), names_to = "Direction", values_to = "Count")
+
+p_counts <- ggplot(deg_long, aes(Tissue, Count, fill = Direction)) +
+  geom_col(width = 0.62) +
+  geom_hline(yintercept = 0, color = "grey35", linewidth = 0.6) +
+  geom_text(
+    data = subset(deg_long, Direction == "Up"),
+    aes(y = Count + label_offset, label = scales::comma(abs(Count))),
+    size = 3, fontface = "bold"
+  ) +
+  geom_text(
+    data = subset(deg_long, Direction == "Down"),
+    aes(y = Count - label_offset, label = scales::comma(abs(Count))),
+    size = 3, fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = c(Up = "#de2d26", Down = "#4f7db8"),
+    labels = c(Up = "Upregulated", Down = "Downregulated")
+  ) +
+  scale_y_continuous(
+    limits = c(-ymax - 800, ymax + 800),
+    breaks = seq(-ymax, ymax, by = 1000),
+    labels = function(x) scales::comma(abs(x))
+  ) +
+  labs(
+    title = "Differentially Expressed Genes per Tissue",
+    subtitle = "FDR <= 0.05, |log2FC| >= 0.5",
+    x = NULL,
+    y = "Number of DEGs"
+  ) +
+  guides(fill = guide_legend(title = NULL, nrow = 1)) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 15),
+    axis.title = element_text(size = 13, face = "bold"),
+    axis.text = element_text(size = 11),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "top",
+    panel.grid.major.y = element_line(color = "grey85", linewidth = 0.4),
+    panel.grid.minor = element_blank()
+  )
+
+p_total <- p_counts
+fig2 <- p_counts
+fig2
+
+ggsave(file.path(output_dir, "DEG_counts.png"), fig2, width = 10, height = 5, dpi = 180)
+```
+
+# Venn diagram made in matplot
+```{r}
+pick_python <- function() {
+  cand <- c(
+    Sys.which("python3"),
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3",
+    "/usr/bin/python3"
+  )
+  cand <- cand[nzchar(cand) & file.exists(cand)]
+  if (!length(cand)) stop("No python3 found. Install Python 3 or give me your python path.")
+  cand[1]
+}
+
+ensure_py_pkgs <- function(py) {
+  chk <- tempfile(fileext = ".py")
+  writeLines(c(
+    "import importlib.util, sys",
+    "mods = ['matplotlib', 'matplotlib_venn']",
+    "missing = [m for m in mods if importlib.util.find_spec(m) is None]",
+    "sys.exit(1 if missing else 0)"
+  ), chk)
+
+  test <- suppressWarnings(system2(py, chk, stdout = TRUE, stderr = TRUE))
+
+  if (!is.null(attr(test, "status"))) {
+    system2(py, c("-m", "pip", "install", "-U", "pip"), stdout = TRUE, stderr = TRUE)
+    inst <- system2(
+      py,
+      c("-m", "pip", "install", "matplotlib", "matplotlib-venn"),
+      stdout = TRUE, stderr = TRUE
+    )
+    test2 <- suppressWarnings(system2(py, chk, stdout = TRUE, stderr = TRUE))
+    if (!is.null(attr(test2, "status"))) stop(paste(c(inst, test2), collapse = "\n"))
+  }
+}
+
+run_exact_venn <- function(up_sets, dn_sets, out_dir) {
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+  payload <- list(
+    up = lapply(up_sets, \(x) unname(as.character(x))),
+    dn = lapply(dn_sets, \(x) unname(as.character(x))),
+    out_png = file.path(out_dir, "venn_diagrams.png"),
+    out_svg = file.path(out_dir, "venn_diagrams.svg")
+  )
+
+  json_path <- tempfile(fileext = ".json")
+  py_path   <- tempfile(fileext = ".py")
+  jsonlite::write_json(payload, json_path, auto_unbox = TRUE)
+
+  writeLines(c(
+    "import json, sys",
+    "import matplotlib",
+    "matplotlib.use('Agg')",
+    "import matplotlib.pyplot as plt",
+    "from matplotlib_venn import venn3",
+    "",
+    "with open(sys.argv[1], 'r') as f:",
+    "    d = json.load(f)",
+    "",
+    "def make_venn(ax, a, b, c, title, colors):",
+    "    v = venn3(subsets=(set(a), set(b), set(c)), set_labels=('Brain', 'ONH', 'Retina'), set_colors=colors, alpha=0.55, ax=ax)",
+    "    for lab in v.set_labels:",
+    "        if lab is not None:",
+    "            lab.set_fontsize(12)",
+    "            lab.set_fontweight('bold')",
+    "    for lab in v.subset_labels:",
+    "        if lab is not None:",
+    "            lab.set_fontsize(10)",
+    "    ax.set_title(title, fontsize=14, fontweight='bold', pad=12)",
+    "",
+    "plt.rcParams.update({'font.family': 'sans-serif'})",
+    "fig, axes = plt.subplots(1, 2, figsize=(14, 6))",
+    "",
+    "make_venn(axes[0], d['up']['Brain'], d['up']['ONH'], d['up']['Retina'], 'Upregulated DEGs (LPS vs PBS)', ['#D62728', '#FF7F0E', '#E377C2'])",
+    "make_venn(axes[1], d['dn']['Brain'], d['dn']['ONH'], d['dn']['Retina'], 'Downregulated DEGs (LPS vs PBS)', ['#1F77B4', '#17BECF', '#9467BD'])",
+    "",
+    "fig.suptitle('Overlap of Differentially Expressed Genes Across Tissues\\n(FDR <= 0.05, |logFC| >= 0.5)', fontsize=13, y=1.01, fontweight='bold')",
+    "plt.tight_layout()",
+    "fig.savefig(d['out_png'], dpi=200, bbox_inches='tight')",
+    "fig.savefig(d['out_svg'], bbox_inches='tight')",
+    "plt.close(fig)"
+  ), py_path)
+
+  py <- pick_python()
+  ensure_py_pkgs(py)
+
+  out <- system2(py, c(py_path, json_path), stdout = TRUE, stderr = TRUE)
+  if (!file.exists(payload$out_png)) stop(paste(out, collapse = "\n"))
+  invisible(payload)
+}
+get_ens_set <- function(df, dir) unique(df$gene_id[df$direction == dir])
+
+brain_up  <- get_ens_set(brain,  "Up")
+onh_up    <- get_ens_set(onh,    "Up")
+retina_up <- get_ens_set(retina, "Up")
+brain_dn  <- get_ens_set(brain,  "Down")
+onh_dn    <- get_ens_set(onh,    "Down")
+retina_dn <- get_ens_set(retina, "Down")
+
+run_exact_venn(
+  up_sets = list(Brain = brain_up, ONH = onh_up, Retina = retina_up),
+  dn_sets = list(Brain = brain_dn, ONH = onh_dn, Retina = retina_dn),
+  out_dir = output_dir
+)
+```
+
+```{r}
+brain  <- prep_deg(brain)
+onh    <- prep_deg(onh)
+retina <- prep_deg(retina)
+
+brain_up  <- get_ens_set(brain,  "Up")
+onh_up    <- get_ens_set(onh,    "Up")
+retina_up <- get_ens_set(retina, "Up")
+
+brain_dn  <- get_ens_set(brain,  "Down")
+onh_dn    <- get_ens_set(onh,    "Down")
+retina_dn <- get_ens_set(retina, "Down")
+
+brain_unique_up  <- setdiff(brain_up,  union(onh_up, retina_up))
+brain_unique_dn  <- setdiff(brain_dn,  union(onh_dn, retina_dn))
+onh_unique_up    <- setdiff(onh_up,    union(brain_up, retina_up))
+onh_unique_dn    <- setdiff(onh_dn,    union(brain_dn, retina_dn))
+retina_unique_up <- setdiff(retina_up, union(brain_up, onh_up))
+retina_unique_dn <- setdiff(retina_dn, union(brain_dn, onh_dn))
+
+shared_up <- Reduce(intersect, list(brain_up, onh_up, retina_up))
+shared_dn <- Reduce(intersect, list(brain_dn, onh_dn, retina_dn))
+```
+
+```{r}
+brain_universe  <- unique(brain$gene_id)
+onh_universe    <- unique(onh$gene_id)
+retina_universe <- unique(retina$gene_id)
+shared_universe <- Reduce(intersect, list(brain_universe, onh_universe, retina_universe))
+
+gene_sets <- list(
+  brain_unique_up  = list(genes = brain_unique_up,  universe = brain_universe),
+  brain_unique_dn  = list(genes = brain_unique_dn,  universe = brain_universe),
+  onh_unique_up    = list(genes = onh_unique_up,    universe = onh_universe),
+  onh_unique_dn    = list(genes = onh_unique_dn,    universe = onh_universe),
+  retina_unique_up = list(genes = retina_unique_up, universe = retina_universe),
+  retina_unique_dn = list(genes = retina_unique_dn, universe = retina_universe),
+  shared_up        = list(genes = shared_up,        universe = shared_universe),
+  shared_dn        = list(genes = shared_dn,        universe = shared_universe)
+)
+
+```
+
+```{r}
+ens_to_entrez <- function(ens_ids) {
+  x <- AnnotationDbi::mapIds(
+    org.Mm.eg.db,
+    keys = ens_ids,
+    column = "ENTREZID",
+    keytype = "ENSEMBL",
+    multiVals = "first"
+  )
+  unique(unname(na.omit(x)))
+}
+
+ora_results <- lapply(names(gene_sets), function(nm) {
+  x <- gene_sets[[nm]]
+  run_ora(x$genes, x$universe, nm)
+})
+names(ora_results) <- names(gene_sets)
+
+iwalk(ora_results, function(x, nm) {
+  iwalk(x, function(df, db) {
+    if (is.data.frame(df) && nrow(df) > 0) {
+      write.csv(df, file.path(ora_dir, paste0(nm, "_", db, ".csv")), row.names = FALSE)
+    }
+  })
+})
+```
+
+```{r}
+parse_gene_ratio <- function(x) {
+  sapply(strsplit(as.character(x), "/"), function(z) as.numeric(z[1]) / as.numeric(z[2]))
+}
+
+fig5a <- (
+  make_dotplot(ora_results$brain_unique_up$GOBP,
+               "Brain - Unique Upregulated\n(GOBP)")
+) /
+(
+  make_dotplot(ora_results$onh_unique_up$GOBP,
+               "ONH - Unique Upregulated\n(GOBP)")
+) /
+(
+  make_dotplot(ora_results$retina_unique_up$GOBP,
+               "Retina - Unique Upregulated\n(GOBP)")
+) +
+  plot_annotation(
+    title = "Pathway Enrichment - Tissue-Unique Upregulated DEGs\n(ORA, FDR ≤ 0.05)",
+    tag_levels = "A",
+    theme = theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+      plot.tag = element_text(face = "bold", size = 20)
+    )
+  ) &
+  theme(
+    plot.tag.position = c(0, 1)
+  )
+
+fig5a
+
+ggsave(
+  file.path(output_dir, "BP_unique_up.png"),
+  fig5a,
+  width = 12,
+  height = 14,
+  dpi = 200,
+  bg = "white"
+)
+ggsave(file.path(output_dir, "BP_unique_up.png"), fig5a, width = 12, height = 14, dpi = 200, bg = "white")
+```
+
+
+## Figure 5B: Tissue-unique downregulated pathways
+
+```{r}
+p_brain_dn  <- make_dotplot(ora_results$brain_unique_dn$GOBP,   "Brain - Unique Downregulated\n(GOBP)") +
+  theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5))
+
+p_onh_dn    <- make_dotplot(ora_results$onh_unique_dn$GOBP,     "ONH - Unique Downregulated\n(GOBP)") +
+  theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5))
+
+p_retina_dn <- make_dotplot(ora_results$retina_unique_dn$GOBP,  "Retina - Unique Downregulated\n(GOBP)") +
+  theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5))
+fig5b <- (p_brain_dn / p_onh_dn / p_retina_dn) +
+  plot_annotation(
+    title      = "Pathway Enrichment - Tissue-Unique Downregulated DEGs\n(ORA, FDR ≤ 0.05)",
+    tag_levels = "A",
+    theme = theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+      plot.tag   = element_text(face = "bold", size = 20)   # was missing entirely — this is why tags were tiny
+    )
+  )
+
+ggsave(
+  file.path(output_dir, "BP_unique_down_pathways.png"),
+  fig5b,
+  width  = 12,
+  height = 14,
+  dpi    = 180,
+  bg     = "white"   
+)
+
+```
+
+## Shared-up enrichment used in section 1 narrative
+
+```{r}
+shared_up_fig <- make_dotplot(ora_results$shared_up$GOBP, "Shared upregulated\nGO:BP", top_n = 12)
+
+shared_up_fig
+
+# ggsave(file.path(output_dir, "Shared_up_pathway_enrichment.png"), shared_up_fig, width = 12, height = 5.5, dpi = 180)
+```
+
+
+```{r}
+
+deg_grob  <- rasterGrob(readPNG(file.path(output_dir, "DEG_counts.png")),
+                         interpolate = TRUE)
+venn_grob <- rasterGrob(readPNG(file.path(output_dir, "venn_diagrams.png")),
+                         interpolate = TRUE)
+
+panel_A <- ggplot() +
+  annotation_custom(deg_grob, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void()
+
+panel_B <- ggplot() +
+  annotation_custom(venn_grob, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void()
+
+panel_C <- wrap_elements(full = shared_up_fig)
+
+top_row <- (panel_A | panel_B) + plot_layout(widths = c(1.2, 1.6))
+
+fig2 <- (top_row / panel_C) +
+  plot_layout(heights = c(1.2, 0.9)) +
+  plot_annotation(
+    tag_levels = "A",
+    theme = theme(
+      plot.tag          = element_text(face = "bold", size = 27),
+      plot.tag.position = "topleft"
+    )
+  )
+
+ggsave(
+  file.path(output_dir, "Figure2_combined.png"),
+  fig2,
+  width  = 18,
+  height = 11,
+  dpi    = 200,
+  bg     = "white"
+)
+```
+

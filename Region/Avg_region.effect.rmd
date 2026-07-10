@@ -1,0 +1,181 @@
+---
+title: "Compare tissues"
+output:
+  pdf_document: default
+---
+
+```{r}
+# source("/pod/2/howell-lab/temket/LPS/functions.R")
+# source("/pod/2/howell-lab/temket/LPS/packages.R")
+output_dir <- "/Users/temket/Desktop/LPS/mod2/Final_scripts/Region/"
+# dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+# load the counts data & meta data 
+```{r}
+source("/Users/temket/Desktop/LPS/mod2/Final_scripts/Region/functions.R")
+obj <- readRDS("/Users/temket/Desktop/LPS/LPS_cts_meta.rds")
+cts <- obj$cts
+meta_data <- obj$meta_data
+```
+
+# Brain_LPS - Brain_PBS
+```{r}
+library(edgeR)
+keep_samp <- meta_data$tissue == "brain"
+cts_b    <- cts[, keep_samp, drop = FALSE]
+meta_b   <- droplevels(meta_data[keep_samp, , drop = FALSE])
+
+trt <- factor(meta_b$treatment, levels = c("PBS", "LPS"))
+strain <- factor(meta_b$Strain)
+group  <- interaction(trt, strain, sep = ".")
+
+y <- DGEList(counts = cts_b, group = group)
+keep_gene <- filterByExpr(y, group = group)
+y <- y[keep_gene, , keep.lib.sizes = TRUE]
+y <- calcNormFactors(y)
+
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+lev <- c("PBS.C57BL/6J", "LPS.C57BL/6J", "PBS.CAST/EiJ", "LPS.CAST/EiJ", "PBS.NZO/HILtJ", "LPS.NZO/HILtJ", "PBS.WSB/EiJ", "LPS.WSB/EiJ")
+
+contr <- setNames(rep(0, length(lev)), lev)
+contr[grep("^LPS\\.", lev)] <-  1/4
+contr[grep("^PBS\\.", lev)] <- -1/4
+
+y <- estimateDisp(y, design)
+fit <- glmQLFit(y, design, robust = TRUE)
+qlf <- glmQLFTest(fit, contrast = contr)
+res <- as.data.frame(topTags(qlf, n = Inf))
+res <- add_biomart_mouse_anno(res)
+
+write.csv(res, file.path(output_dir, "Brain.effect.csv"), row.names = TRUE)
+
+```
+
+## volcano ploting: res_obj$logFC, -log10(res_obj$FDR), res_obj$symbol
+```{r}
+p1 <- create_volcano(res, FC = "logFC", title = "brain")
+ggsave(file.path(output_dir,"brain.volcano.png"), p1 , width = 10, height = 7, dpi = 1000)
+```
+
+## heatmap: FDR, logFC, meta_data 
+```{r}
+p2 <- plot_sig_heatmap(res, y, meta_b,  show_colnames = TRUE, top_n = 25)
+png(file.path(output_dir, "brain.heatmap.png"), width = 10, height = 7, units = "in", res = 1000)
+grid::grid.newpage()
+grid::grid.draw(p2$pheatmap$gtable)  # <- key
+dev.off()
+```
+
+# Retina_LPS - Retina_PBS
+```{r}
+meta_data <- meta_data[colnames(cts), , drop = FALSE]
+keep_samp <- meta_data$tissue == "retina"
+cts_r  <- cts[, keep_samp, drop = FALSE]
+meta_r <- droplevels(meta_data[keep_samp, , drop = FALSE])
+
+trt_r <- factor(meta_r$treatment, levels = c("PBS","LPS"))
+strain <- factor(meta_r$Strain)
+group_r  <- interaction(trt_r, strain, sep = ".")
+
+y_r <- DGEList(cts_r, group = group_r)
+keep_gene_r <- filterByExpr(y_r, group = group_r)
+y_r <- y_r[keep_gene_r, , keep.lib.sizes = TRUE]
+y_r <- calcNormFactors(y_r)
+
+design_r <- model.matrix(~0 + group_r)
+colnames(design_r) <- levels(group_r)
+
+lev <- c("PBS.C57BL/6J", "LPS.C57BL/6J", "PBS.CAST/EiJ", "LPS.CAST/EiJ", "PBS.NZO/HILtJ", "LPS.NZO/HILtJ", "PBS.WSB/EiJ", "LPS.WSB/EiJ")
+contr_r <- setNames(rep(0, length(lev)), lev)
+contr_r[grep("^LPS\\.", lev)] <-  1/4
+contr_r[grep("^PBS\\.", lev)] <- -1/4
+
+y_r <- estimateDisp(y_r, design_r)
+fit_r <- glmQLFit(y_r, design_r, robust = TRUE)
+qlf_r <- glmQLFTest(fit_r, contrast = contr_r)
+
+res_retina <- as.data.frame(topTags(qlf_r, n = Inf))
+res_retina <- add_biomart_mouse_anno(res_retina)
+write.csv(res_retina,file.path(output_dir, "Retina.effect.csv"), row.names = TRUE)
+```
+
+## Retina volcano ploting: res_obj$logFC, -log10(res_obj$FDR), res_obj$symbol
+```{r}
+p3 <- create_volcano(res_retina,FC = "logFC", "retina")
+ggsave(file.path(output_dir,"Retina.volcano.png"), p3 , width = 10, height = 7, dpi = 1000)
+```
+
+## heatmap: FDR, logFC, meta_data 
+```{r}
+p4 <- plot_sig_heatmap(res_retina, y_r, meta_r,  show_colnames = TRUE, top_n = 25)
+png(file.path(output_dir, "Retina.heatmap.png"), width = 10, height = 7, units = "in", res = 1000)
+grid::grid.newpage()
+grid::grid.draw(p4$pheatmap$gtable)  # <- key
+dev.off()
+```
+
+# ONH_LPS - ONH_PBS
+```{r}
+keep_samp <- meta_data$tissue == "ONH"
+cts_o  <- cts[, keep_samp, drop = FALSE]
+meta_o <- droplevels(meta_data[keep_samp, , drop = FALSE])
+
+trt_o <- factor(meta_o$treatment, levels = c("PBS","LPS"))
+strain <- factor(meta_o$Strain)
+group_o  <- interaction(trt_o, strain, sep = ".")
+
+y_o <- DGEList(cts_o, group = group_o)
+keep_gene_o <- filterByExpr(y_o, group = group_o)
+y_o <- y_o[keep_gene_o, , keep.lib.sizes = TRUE]
+y_o <- calcNormFactors(y_o)
+
+design_o <- model.matrix(~0 + group_o)
+colnames(design_o) <- levels(group_o)
+
+lev <- c("PBS.C57BL/6J", "LPS.C57BL/6J", "PBS.CAST/EiJ", "LPS.CAST/EiJ", "PBS.NZO/HILtJ", "LPS.NZO/HILtJ", "PBS.WSB/EiJ", "LPS.WSB/EiJ")
+contr_o <- setNames(rep(0, length(lev)), lev)
+contr_o[grep("^LPS\\.", lev)] <-  1/4
+contr_o[grep("^PBS\\.", lev)] <- -1/4
+
+y_o <- estimateDisp(y_o, design_o)
+fit_o <- glmQLFit(y_o, design_o, robust = TRUE)
+qlf_o <- glmQLFTest(fit_o, contrast = contr_o)
+
+res_ONH <- as.data.frame(topTags(qlf_o, n = Inf))
+res_ONH <- add_biomart_mouse_anno(res_ONH)
+write.csv(res_ONH, file.path(output_dir,"ONH.effect.csv"), row.names = TRUE)
+```
+
+
+```{r}
+```
+
+## volcano ploting: res_obj$logFC, -log10(res_obj$FDR), res_obj$symbol
+```{r}
+p5 <- create_volcano(res_ONH,FC = "logFC", "ONH")
+ggsave(file.path(output_dir,"ONH.volcano.png"), p5 , width = 10, height = 7, dpi = 1000)
+```
+
+## heatmap: FDR, logFC, meta_data 
+```{r}
+p6 <- plot_sig_heatmap(res_ONH, y_o, meta_o,  show_colnames = TRUE, top_n = 25)
+png(file.path(output_dir, "ONH.heatmap.png"), width = 10, height = 7, units = "in", res = 1000)
+grid::grid.newpage()
+grid::grid.draw(p6$pheatmap$gtable)  # <- key
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
